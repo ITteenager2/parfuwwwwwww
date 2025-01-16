@@ -16,7 +16,10 @@ class Database:
                             (id INTEGER PRIMARY KEY, user_id INTEGER, text TEXT, timestamp DATETIME)''')
         self.cur.execute('''CREATE TABLE IF NOT EXISTS support_requests
                             (id INTEGER PRIMARY KEY, user_id INTEGER, request TEXT, timestamp DATETIME)''')
+        self.cur.execute('''CREATE TABLE IF NOT EXISTS dialogue_history
+                            (user_id INTEGER PRIMARY KEY, history TEXT)''')
         self.conn.commit()
+
 
     def add_user(self, user_id, username):
         self.cur.execute("INSERT OR IGNORE INTO users (id, username, last_active) VALUES (?, ?, ?)",
@@ -58,17 +61,17 @@ class Database:
         self.conn.commit()
 
     def get_statistics(self):
-        total_users = self.cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        active_users = self.cur.execute("SELECT COUNT(*) FROM users WHERE last_active >= date('now', '-1 day')").fetchone()[0]
+        total_users = self.cur.execute("SELECT COUNT(*) FROM users").fetchone()[0] or 0
+        active_users = self.cur.execute("SELECT COUNT(*) FROM users WHERE last_active >= date('now', '-1 day')").fetchone()[0] or 0
         avg_rating = self.cur.execute("SELECT AVG(rating) FROM recommendations WHERE rating IS NOT NULL").fetchone()[0]
-        total_recommendations = self.cur.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0]
-        total_feedback = self.cur.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
-        total_support_requests = self.cur.execute("SELECT COUNT(*) FROM support_requests").fetchone()[0]
-        
+        total_recommendations = self.cur.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] or 0
+        total_feedback = self.cur.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] or 0
+        total_support_requests = self.cur.execute("SELECT COUNT(*) FROM support_requests").fetchone()[0] or 0
+    
         return {
             "total_users": total_users,
             "active_users": active_users,
-            "avg_rating": avg_rating,
+            "avg_rating": avg_rating,  # This can still be None if there are no ratings
             "total_recommendations": total_recommendations,
             "total_feedback": total_feedback,
             "total_support_requests": total_support_requests
@@ -82,6 +85,21 @@ class Database:
     def get_total_feedback_pages(self, per_page=5):
         total = self.cur.execute("SELECT COUNT(*) FROM feedback").fetchone()[0]
         return (total + per_page - 1) // per_page
+
+    def get_dialogue_history(self, user_id):
+        self.cur.execute("SELECT history FROM dialogue_history WHERE user_id = ?", (user_id,))
+        result = self.cur.fetchone()
+        return result[0] if result else None
+
+    def update_dialogue_history(self, user_id, history):
+        self.cur.execute("INSERT OR REPLACE INTO dialogue_history (user_id, history) VALUES (?, ?)",
+                         (user_id, history))
+        self.conn.commit()
+
+    def clear_dialogue_history(self, user_id):
+        self.cur.execute("DELETE FROM dialogue_history WHERE user_id = ?", (user_id,))
+        self.conn.commit()
+
 
 db = Database("perfume_bot.db")
 

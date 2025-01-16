@@ -27,6 +27,12 @@ show_menu_kb = InlineKeyboardMarkup(
     ]
 )
 
+admin_kbs = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text="Показать меню", callback_data="open_kb_admin")],
+    ]
+)
+
 rating_kb = InlineKeyboardMarkup(
     inline_keyboard=[
         [InlineKeyboardButton(text=str(i), callback_data=f"rate_{i}") for i in range(1, 6)]

@@ -1,12 +1,14 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from database import db
-from keyboards import main_kb, admin_kb, show_menu_kb, rating_kb, create_feedback_navigation
+from keyboards import main_kb, admin_kb, show_menu_kb, rating_kb, create_feedback_navigation, admin_kbs
 from openai_integration import generate_perfume_recommendation
 from config import ADMIN_IDS
+from session_manager import session_manager
+from dialogue_manager import dialogue_manager
 
 router = Router()
 
@@ -18,23 +20,72 @@ class UserState(StatesGroup):
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
-    db.add_user(message.from_user.id, message.from_user.username)
-    if message.from_user.id in ADMIN_IDS:
-        await message.answer("Добро пожаловать в админ-панель!", reply_markup=admin_kb)
+    user_id = message.from_user.id
+    session = session_manager.get_session(user_id)
+    
+    if 'greeted' not in session:
+        db.add_user(user_id, message.from_user.username)
+        dialogue_manager.clear_dialogue_history(user_id)
+        if user_id in ADMIN_IDS:
+            await message.answer("Добро пожаловать. Ваш статус: Админ", reply_markup=main_kb)
+            await message.answer("Для открытия админки - жмайте кнопку ниже", reply_markup=admin_kbs)
+        else:
+            await message.answer("Добро пожаловать в AI-консультант по подбору парфюмерии!", reply_markup=main_kb)
+            await message.answer("Пользуйтесь кнопками на вашей клавиатуре для", reply_markup=admin_kb)
+        session_manager.update_session(user_id, 'greeted', True)
     else:
-        await message.answer("Добро пожаловать в AI-консультант по подбору парфюмерии!", reply_markup=main_kb)
+        await message.answer("С возвращением! Чем я могу вам помочь?", reply_markup=main_kb)
 
 @router.message(F.text == "Подобрать парфюм")
 async def select_perfume(message: Message, state: FSMContext):
-    await state.set_state(UserState.waiting_for_perfume_input)
-    await message.answer("Опишите, пожалуйста, какой аромат вы ищете или какие у вас предпочтения:")
+    user_id = message.from_user.id
+    session = session_manager.get_session(user_id)
+    
+    if 'preferences_asked' not in session:
+        await state.set_state(UserState.waiting_for_perfume_input)
+        await message.answer("Опишите, пожалуйста, какой аромат вы ищете или какие у вас предпочтения.\n\nНаш консультант поможет вам сразу как только сможет!")
+        session_manager.update_session(user_id, 'preferences_asked', True)
+    else:
+        await message.answer("Я помню ваши предпочтения. Хотите, чтобы я подобрал парфюм на основе предыдущей информации или вы хотите рассказать о новых пожеланиях?", 
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                 [InlineKeyboardButton(text="Использовать предыдущие предпочтения", callback_data="use_previous")],
+                                 [InlineKeyboardButton(text="Рассказать о новых пожеланиях", callback_data="new_preferences")]
+                             ]))
 
 @router.message(UserState.waiting_for_perfume_input)
 async def process_perfume_input(message: Message, state: FSMContext):
-    db.update_user_activity(message.from_user.id)
-    recommendation = await generate_perfume_recommendation(message.text)
-    db.add_recommendation(message.from_user.id, recommendation)
+    user_id = message.from_user.id
+    db.update_user_activity(user_id)
+    dialogue_manager.add_to_dialogue_history(user_id, "user", message.text)
+    recommendation = await generate_perfume_recommendation(user_id, message.text)
+    db.add_recommendation(user_id, recommendation)
     await message.answer(recommendation, reply_markup=show_menu_kb)
+
+@router.callback_query(F.data == "use_previous")
+async def use_previous_preferences(callback: CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    dialogue_history = dialogue_manager.get_dialogue_history(user_id)
+    
+    if dialogue_history:
+        last_user_message = next((msg['content'] for msg in reversed(dialogue_history) if msg['role'] == 'user'), None)
+        if last_user_message:
+            recommendation = await generate_perfume_recommendation(user_id, last_user_message)
+            db.add_recommendation(user_id, recommendation)
+            await callback.message.answer(recommendation, reply_markup=show_menu_kb)
+        else:
+            await callback.message.answer("Извините, я не нашел ваших предыдущих предпочтений. Давайте начнем заново.")
+            await select_perfume(callback.message, state)
+    else:
+        await callback.message.answer("Извините, я не нашел ваших предыдущих предпочтений. Давайте начнем заново.")
+        await select_perfume(callback.message, state)
+    
+    await callback.answer()
+
+@router.callback_query(F.data == "new_preferences")
+async def ask_new_preferences(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(UserState.waiting_for_perfume_input)
+    await callback.message.answer("Хорошо, расскажите мне о ваших новых пожеланиях:")
+    await callback.answer()
 
 @router.callback_query(F.data == "show_menu")
 async def show_menu(callback: CallbackQuery, state: FSMContext):
@@ -99,17 +150,16 @@ async def show_statistics(message: Message):
         stats = db.get_statistics()
         text = f"""
 Статистика:
-Всего пользователей: {stats['total_users']}
-Активных пользователей: {stats['active_users']}
-Средняя оценка рекомендаций: {stats['avg_rating']:.2f if stats['avg_rating'] is not None else 'Нет данных'}
-Всего рекомендаций: {stats['total_recommendations']}
-Всего отзывов: {stats['total_feedback']}
-Всего обращений в поддержку: {stats['total_support_requests']}
+Всего пользователей: {stats.get('total_users', 'Нет данных')}
+Активных пользователей: {stats.get('active_users', 'Нет данных')}
+Средняя оценка рекомендаций: {f"{stats['avg_rating']:.2f}" if stats.get('avg_rating') is not None else 'Нет данных'}
+Всего рекомендаций: {stats.get('total_recommendations', 'Нет данных')}
+Всего отзывов: {stats.get('total_feedback', 'Нет данных')}
+Всего обращений в поддержку: {stats.get('total_support_requests', 'Нет данных')}
 """
         await message.answer(text)
     else:
         await message.answer("У вас нет доступа к этой функции.")
-
 
 @router.message(F.text == "Рассылка")
 async def start_broadcast(message: Message, state: FSMContext):
@@ -131,7 +181,18 @@ async def process_broadcast(message: Message, state: FSMContext):
 @router.message(F.text == "Вернуться в главное меню")
 async def return_to_main_menu(message: Message):
     if message.from_user.id in ADMIN_IDS:
-        await message.answer("Выберите действие:", reply_markup=main_kb)
+        await message.answer("Выберите действие:", reply_markup=admin_kb)
     else:
         await message.answer("Выберите действие:", reply_markup=main_kb)
 
+@router.callback_query(F.data.startswith("open_kb_admin"))
+async def inline_kb_admin(callback: CallbackQuery):
+    text = "Пользуйтесь кнопками на клавиатуре."
+    await callback.message.answer(text, reply_markup=admin_kb)
+    await callback.answer()
+
+@router.message(F.text == "Очистить историю")
+async def clear_history(message: Message):
+    user_id = message.from_user.id
+    dialogue_manager.clear_dialogue_history(user_id)
+    await message.answer("История диалога очищена. Давайте начнем сначала!", reply_markup=main_kb)
